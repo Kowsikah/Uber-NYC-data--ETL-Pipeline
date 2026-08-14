@@ -47,11 +47,33 @@ GOLD (star schema: FACT_TRIPS, DIM_ZONES, DIM_PROVIDERS, DIM_DATE)
     They can't reach a local filesystem to run `PUT`, so loading new monthly
     files into the stage stays a manual/external step no matter what
     orchestrates the transform layer.
-- **Every transformation was validated against real data before being
-  written as Snowflake SQL** — see `validation/validation_report.md`. The
-  January 2021 file (11.9M rows) was run through the same logic locally
-  first, confirming a 100% zone-join match rate and a sub-0.001% reject rate
-  on the quality filter before ever touching the warehouse.
+- **Every transformation was validated against real data** — see the
+  "Validated results" section below. Logic was proven first on the
+  January 2021 file (11.9M rows, 100% zone-join match rate, <0.001%
+  reject rate on the quality filter) before being run across the full year.
+
+## Validated results (full year 2021)
+
+Run against the complete 12-month load (`RAW.TRIPS`, ~174.6M raw rows):
+
+| Check | Result |
+|---|---|
+| Total rows in `GOLD.FACT_TRIPS` | **174,588,481** |
+| Bad time order (`dropoff <= pickup`) | **0** |
+| Unmapped providers (`provider_name IS NULL`) | **0** |
+| Unmatched pickup zones | **0** |
+| Unmatched dropoff zones | **0** |
+| `SP_QUALITY_CHECK()` task status | **Passed** (no bad rows found post-rebuild) |
+
+Zone lookup load: 265/265 rows loaded from `taxi_zone_lookup.csv`, 0 errors.
+
+Provider mapping (`GOLD.DIM_PROVIDERS`):
+
+| hvfhs_license_num | provider_name |
+|---|---|
+| HV0003 | Uber |
+| HV0005 | Lyft |
+| HV0004 | Via |
 
 ## Data quality notes
 
@@ -68,22 +90,19 @@ GOLD (star schema: FACT_TRIPS, DIM_ZONES, DIM_PROVIDERS, DIM_DATE)
 ## Repo structure
 
 ```
-sql/
-  01_create_stage_and_raw.sql     -- DB, warehouse, schemas, internal stages, RAW tables
-  02_staging.sql                  -- typed/cleaned STAGING views
-  03_intermediate_and_gold.sql    -- zone-enriched view + GOLD star schema
-  04_quality_checks.sql           -- standalone ad hoc quality queries
-  05_sample_analysis.sql          -- business-question queries (also used as Power BI source queries)
-  07_snowflake_tasks_orchestration.sql  -- stored procedures + Task graph (monthly schedule)
-validation/
-  validation_report.md            -- local validation results against real Jan 2021 data
+setup_raw_action.sql   -- DB, warehouse, schemas, internal stages, RAW tables
+staging_schema.sql     -- typed/cleaned STAGING views
+intermediate_gold.sql  -- zone-enriched view + GOLD star schema
+quality-check.sql      -- standalone ad hoc quality queries
+sample_analysis.sql    -- business-question queries (also used as Power BI source queries)
+orchestration.sql      -- stored procedures + Task graph (monthly schedule)
 README.md
 ```
 
 ## Setup
 
 1. **Snowflake**: sign up at snowflake.com (no card needed), note your account URL.
-2. Run `sql/01_create_stage_and_raw.sql` in a Snowflake worksheet to create the
+2. Run `setup_raw_action.sql` in a Snowflake worksheet to create the
    database, warehouse, schemas, internal stages, and raw tables.
 3. From SnowSQL CLI, load each month's files:
    ```bash
@@ -91,17 +110,17 @@ README.md
    PUT file://./data/fhvhv_tripdata_2021-01.parquet @RAW.HVFHS_STAGE;
    PUT file://./data/taxi_zone_lookup.csv @RAW.ZONES_STAGE;
    ```
-   Then run the `COPY INTO` statements at the bottom of `01_create_stage_and_raw.sql`.
-4. Run `sql/02_staging.sql`, then `sql/03_intermediate_and_gold.sql`.
-5. Run `sql/04_quality_checks.sql` — all checks should return 0 bad rows.
-6. Run `sql/05_sample_analysis.sql` for the business-question queries — these
+   Then run the `COPY INTO` statements at the bottom of `setup_raw_action.sql`.
+4. Run `staging_schema.sql`, then `intermediate_gold.sql`.
+5. Run `quality-check.sql` — all checks should return 0 bad rows.
+6. Run `sample_analysis.sql` for the business-question queries — these
    double as your Power BI dataset queries.
 
 ## Orchestration (Snowflake Tasks)
 
 ```sql
 -- Run once to create the stored procedures and Task graph:
-sql/07_snowflake_tasks_orchestration.sql
+orchestration.sql
 ```
 
 This creates:
@@ -136,15 +155,15 @@ SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
 Get Data → Snowflake → account URL + warehouse `HVFHS_WH` → select
 `GOLD.FACT_TRIPS`, `GOLD.DIM_ZONES`, `GOLD.DIM_PROVIDERS`, `GOLD.DIM_DATE` →
 build relationships in Model view → dashboard the queries in
-`sql/05_sample_analysis.sql`.
+`sample_analysis.sql`.
 
-**Dashboard covers (full year 2021, ~174.6M trips loaded):**
+**Dashboard covers (full year 2021, 174,588,481 trips loaded):**
 - Executive KPIs: total trips, total revenue, total driver pay, avg fare
-- Provider market share (Uber ~71%, Lyft ~28%, Via <1%) and driver pay by provider
+- Provider market share (Uber ~70.8%, Lyft ~28.6%, Via ~0.6%) and driver pay by provider
 - Monthly trend: trips, revenue, and avg fare by `_source_month`
 - Pickup × dropoff borough cross-tab (cross-borough travel patterns)
 - Top pickup/dropoff zones by trip count and revenue
-- Airport vs non-airport trip split
+- Airport vs non-airport trip split (~6.4% airport trips)
 
 ## Scale story
 
@@ -155,4 +174,5 @@ build relationships in Model view → dashboard the queries in
   instead of Databricks/ADLS, and Snowflake Tasks instead of Airflow — both
   chosen for zero infra cost and no cross-platform auth to manage, while
   still demonstrating the same medallion architecture and DAG-based
-  orchestration pattern used in production.
+  orchestration pattern used in production, at a genuine scale of nearly
+  175M rows.
